@@ -26,7 +26,6 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
 OWNER_IDS = {
-    8753850861,
     8552447077,
 }
 
@@ -50,8 +49,11 @@ WIN_MULTIPLIER = 1.8
 
 REFERRAL_REWARD = 45
 
-# حداکثر ۵ بازی فعال همزمان
-MAX_ACTIVE_GAMES = 5
+# حداکثر تعداد پرتاب در هر بازی
+MAX_ROLL_COUNT = 3
+
+# آستانه گل شدن در بسکتبال (تاس >= 3 = گل)
+BASKETBALL_GOAL_MIN = 3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -72,6 +74,7 @@ GAME_EMOJI = {
     "تاس": "🎲",
     "بولینگ": "🎳",
     "دارت": "🎯",
+    "بسکتبال": "🎲",
 }
 
 # =========================================================
@@ -388,12 +391,25 @@ def clean_text(text):
 
 def calculate_win_reward(amount):
 
-    # مثال:
-    # 100 -> 180
-    # 400 -> 720
-    # 1000 -> 1800
-
     return int(amount * WIN_MULTIPLIER)
+
+
+# =========================================================
+# BASKETBALL HELPERS
+# =========================================================
+
+def is_basketball_goal(value):
+
+    return value >= BASKETBALL_GOAL_MIN
+
+
+def count_basketball_goals(rolls):
+
+    return sum(
+        1
+        for value in rolls
+        if is_basketball_goal(value)
+    )
 
 
 # =========================================================
@@ -620,19 +636,6 @@ async def show_balance(update, context):
 # GAME SYSTEM
 # =========================================================
 
-def active_game_count(chat_id):
-
-    return sum(
-        1
-        for game in games.values()
-        if game["chat_id"] == chat_id
-        and game["status"] not in (
-            "finished",
-            "cancelled"
-        )
-    )
-
-
 def new_game_id():
 
     return secrets.token_hex(6)
@@ -695,11 +698,10 @@ async def create_game(
     chat_id = update.effective_chat.id
     user = update.effective_user
 
-    # حداکثر ۵ بازی فعال
-    if active_game_count(chat_id) >= MAX_ACTIVE_GAMES:
+    if count > MAX_ROLL_COUNT:
 
         await update.message.reply_text(
-            "❌ در حال حاضر ۵ بازی فعال است."
+            f"❌ حداکثر تعداد پرتاب {MAX_ROLL_COUNT} است."
         )
 
         return
@@ -775,6 +777,20 @@ async def create_game(
         "message_id": update.message.message_id
     }
 
+    if game_type == "بسکتبال":
+
+        extra = (
+            f"🏀 قانون بسکتبال:\n"
+            f"تاس ۳، ۴، ۵، ۶ = گل ✅\n"
+            f"تاس ۱ یا ۲ = بیرون ❌\n"
+            f"هرکی گل بیشتر = برنده\n"
+            f"اگه صفر گل بزنی = باختی\n\n"
+        )
+
+    else:
+
+        extra = ""
+
     await update.message.reply_text(
 
         f"🎮 بازی جدید ساخته شد\n\n"
@@ -788,6 +804,8 @@ async def create_game(
 
         f"🏆 برد: "
         f"{calculate_win_reward(amount):,} {UNIT}\n\n"
+
+        f"{extra}"
 
         f"یکی از گزینه‌ها را انتخاب کن:",
 
@@ -905,6 +923,29 @@ async def start_friend_game(
         await query.answer(
             "❌ این بازی قبلاً شروع شده.",
             show_alert=True
+        )
+
+        return
+
+    success = await remove_balance(
+        game["creator_id"],
+        game["amount"]
+    )
+
+    if not success:
+
+        games.pop(
+            game["id"],
+            None
+        )
+
+        await query.answer(
+            "❌ موجودی کافی نیست.",
+            show_alert=True
+        )
+
+        await query.message.edit_text(
+            "❌ بازی به دلیل کمبود موجودی لغو شد."
         )
 
         return
@@ -1083,23 +1124,43 @@ async def cancel_game(
 
         return
 
-    # اگر مبلغ کسر شده، برگردانده شود
-    if game["status"] in (
-        "creator_turn",
-        "opponent_turn"
-    ):
+    if game["mode"] == "bot":
 
-        await add_balance(
-            game["creator_id"],
-            game["amount"]
-        )
-
-        if game["opponent_id"]:
+        if game["status"] in (
+            "creator_turn",
+            "opponent_turn"
+        ):
 
             await add_balance(
-                game["opponent_id"],
+                game["creator_id"],
                 game["amount"]
             )
+
+    elif game["mode"] == "friend":
+
+        if game["status"] == "waiting_opponent":
+
+            await add_balance(
+                game["creator_id"],
+                game["amount"]
+            )
+
+        elif game["status"] in (
+            "creator_turn",
+            "opponent_turn"
+        ):
+
+            await add_balance(
+                game["creator_id"],
+                game["amount"]
+            )
+
+            if game["opponent_id"]:
+
+                await add_balance(
+                    game["opponent_id"],
+                    game["amount"]
+                )
 
     games.pop(
         game["id"],
@@ -1140,16 +1201,7 @@ async def process_roll(update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    game_type = None
-
-    for name, game_emoji in GAME_EMOJI.items():
-
-        if game_emoji == emoji:
-
-            game_type = name
-            break
-
-    if not game_type:
+    if emoji != "🎲" and emoji != "🎳" and emoji != "🎯":
         return
 
     selected = None
@@ -1159,7 +1211,7 @@ async def process_roll(update, context):
         if game["chat_id"] != chat_id:
             continue
 
-        if game["type"] != game_type:
+        if game["emoji"] != emoji:
             continue
 
         if game["status"] not in (
@@ -1204,18 +1256,39 @@ async def process_roll(update, context):
             game["creator_rolls"]
         )
 
-        total = sum(
-            game["creator_rolls"]
-        )
-
         max_rolls = game["roll_count"]
 
-        if current < max_rolls:
+        # =========================
+        # بسکتبال: محاسبه گل
+        # =========================
 
-            await context.bot.send_message(
+        if game["type"] == "بسکتبال":
 
-                chat_id,
+            goal = is_basketball_goal(value)
 
+            goal_icon = "✅ گل" if goal else "❌ بیرون"
+
+            goals_total = count_basketball_goals(
+                game["creator_rolls"]
+            )
+
+            progress_text = (
+                f"🏀 پرتاب {current} از {max_rolls}\n\n"
+
+                f"👤 {game['creator_name']}: "
+                f"{value} → {goal_icon}\n"
+
+                f"🥅 گل‌های فعلی: "
+                f"{goals_total}\n\n"
+            )
+
+        else:
+
+            total = sum(
+                game["creator_rolls"]
+            )
+
+            progress_text = (
                 f"🎲 پرتاب {current} از {max_rolls}\n\n"
 
                 f"👤 {game['creator_name']}: "
@@ -1223,6 +1296,15 @@ async def process_roll(update, context):
 
                 f"➕ مجموع فعلی: "
                 f"{total}\n\n"
+            )
+
+        if current < max_rolls:
+
+            await context.bot.send_message(
+
+                chat_id,
+
+                progress_text +
 
                 f"🎯 پرتاب بعدی را انجام بده."
             )
@@ -1239,21 +1321,17 @@ async def process_roll(update, context):
 
                 chat_id,
 
-                f"✅ {game['creator_name']} "
-                f"هر {max_rolls} پرتاب را انجام داد.\n\n"
-
-                f"📊 مجموع شما: "
-                f"{total}\n\n"
+                progress_text +
 
                 f"🤖 حالا ربات {max_rolls} بار "
-                f"{game_type} می‌اندازد..."
+                f"{game['type']} می‌اندازد..."
             )
 
             for _ in range(max_rolls):
 
                 bot_message = await context.bot.send_dice(
                     chat_id,
-                    emoji=emoji
+                    emoji=game["emoji"]
                 )
 
                 bot_value = bot_message.dice.value
@@ -1281,10 +1359,7 @@ async def process_roll(update, context):
 
             chat_id,
 
-            f"✅ {game['creator_name']} "
-            f"هر {max_rolls} پرتاب را انجام داد.\n\n"
-
-            f"📊 مجموع: {total}\n\n"
+            progress_text +
 
             f"🎯 حالا نوبت "
             f"{game['opponent_name']} است.\n\n"
@@ -1312,18 +1387,35 @@ async def process_roll(update, context):
             game["opponent_rolls"]
         )
 
-        total = sum(
-            game["opponent_rolls"]
-        )
-
         max_rolls = game["roll_count"]
 
-        if current < max_rolls:
+        if game["type"] == "بسکتبال":
 
-            await context.bot.send_message(
+            goal = is_basketball_goal(value)
 
-                chat_id,
+            goal_icon = "✅ گل" if goal else "❌ بیرون"
 
+            goals_total = count_basketball_goals(
+                game["opponent_rolls"]
+            )
+
+            progress_text = (
+                f"🏀 پرتاب {current} از {max_rolls}\n\n"
+
+                f"👤 {game['opponent_name']}: "
+                f"{value} → {goal_icon}\n"
+
+                f"🥅 گل‌های فعلی: "
+                f"{goals_total}\n\n"
+            )
+
+        else:
+
+            total = sum(
+                game["opponent_rolls"]
+            )
+
+            progress_text = (
                 f"🎲 پرتاب {current} از {max_rolls}\n\n"
 
                 f"👤 {game['opponent_name']}: "
@@ -1331,6 +1423,15 @@ async def process_roll(update, context):
 
                 f"➕ مجموع فعلی: "
                 f"{total}\n\n"
+            )
+
+        if current < max_rolls:
+
+            await context.bot.send_message(
+
+                chat_id,
+
+                progress_text +
 
                 f"🎯 پرتاب بعدی را انجام بده."
             )
@@ -1352,6 +1453,197 @@ async def finish_game(
     game
 ):
 
+    reward = calculate_win_reward(
+        game["amount"]
+    )
+
+    opponent_title = (
+        "🤖 ربات"
+        if game["mode"] == "bot"
+        else f"👤 {game['opponent_name']}"
+    )
+
+    # =====================================================
+    # بسکتبال
+    # =====================================================
+
+    if game["type"] == "بسکتبال":
+
+        creator_goals = count_basketball_goals(
+            game["creator_rolls"]
+        )
+
+        opponent_goals = count_basketball_goals(
+            game["opponent_rolls"]
+        )
+
+        creator_rolls = " + ".join(
+            map(
+                str,
+                game["creator_rolls"]
+            )
+        )
+
+        opponent_rolls = " + ".join(
+            map(
+                str,
+                game["opponent_rolls"]
+            )
+        )
+
+        text = (
+
+            f"🏁 نتیجه بازی بسکتبال\n\n"
+
+            f"🎯 {game['type']}\n"
+
+            f"🔢 {game['roll_count']} پرتاب\n"
+
+            f"💠 مبلغ بازی: "
+            f"{game['amount']:,} {UNIT}\n"
+
+            f"🏆 پاداش برد: "
+            f"{reward:,} {UNIT}\n\n"
+
+            f"👤 {game['creator_name']}:\n"
+
+            f"🎲 {creator_rolls}\n"
+
+            f"🥅 گل‌ها: "
+            f"{creator_goals}\n\n"
+
+            f"{opponent_title}:\n"
+
+            f"🎲 {opponent_rolls}\n"
+
+            f"🥅 گل‌ها: "
+            f"{opponent_goals}\n\n"
+        )
+
+        # کاربر صفر گل زده → می‌بازه
+        if creator_goals == 0:
+
+            text += (
+                "❌ شما هیچ گلی نزدید!\n"
+                "❌ باخت.\n"
+            )
+
+            if game["mode"] == "friend":
+
+                await add_balance(
+                    game["opponent_id"],
+                    reward
+                )
+
+                new_balance = await get_balance(
+                    game["opponent_id"]
+                )
+
+                text += (
+                    f"\n🏆 برنده: "
+                    f"{game['opponent_name']}\n"
+
+                    f"🎁 جایزه: "
+                    f"+{reward:,} {UNIT}\n"
+
+                    f"💰 موجودی جدید برنده: "
+                    f"{new_balance:,} {UNIT}"
+                )
+
+        elif creator_goals > opponent_goals:
+
+            await add_balance(
+                game["creator_id"],
+                reward
+            )
+
+            new_balance = await get_balance(
+                game["creator_id"]
+            )
+
+            text += (
+
+                f"🏆 برنده: "
+                f"{game['creator_name']}\n\n"
+
+                f"🎁 جایزه برد:\n"
+                f"+{reward:,} {UNIT}\n\n"
+
+                f"💰 موجودی جدید:\n"
+                f"{new_balance:,} {UNIT}"
+            )
+
+        elif opponent_goals > creator_goals:
+
+            if game["mode"] == "bot":
+
+                text += (
+                    "🤖 ربات برنده شد.\n\n"
+                    "❌ این بار برنده نشدی."
+                )
+
+            else:
+
+                await add_balance(
+                    game["opponent_id"],
+                    reward
+                )
+
+                new_balance = await get_balance(
+                    game["opponent_id"]
+                )
+
+                text += (
+
+                    f"🏆 برنده: "
+                    f"{game['opponent_name']}\n\n"
+
+                    f"🎁 جایزه برد:\n"
+                    f"+{reward:,} {UNIT}\n\n"
+
+                    f"💰 موجودی جدید برنده:\n"
+                    f"{new_balance:,} {UNIT}"
+                )
+
+        else:
+
+            # مساوی
+            await add_balance(
+                game["creator_id"],
+                game["amount"]
+            )
+
+            if game["mode"] == "friend":
+
+                await add_balance(
+                    game["opponent_id"],
+                    game["amount"]
+                )
+
+            text += (
+
+                "🤝 بازی مساوی شد.\n\n"
+
+                "💰 مبلغ بازی به بازیکنان "
+                "برگشت داده شد."
+            )
+
+        games.pop(
+            game["id"],
+            None
+        )
+
+        await context.bot.send_message(
+            game["chat_id"],
+            text
+        )
+
+        return
+
+    # =====================================================
+    # بقیه بازی‌ها (تاس، بولینگ، دارت)
+    # =====================================================
+
     creator_total = sum(
         game["creator_rolls"]
     )
@@ -1372,16 +1664,6 @@ async def finish_game(
             str,
             game["opponent_rolls"]
         )
-    )
-
-    reward = calculate_win_reward(
-        game["amount"]
-    )
-
-    opponent_title = (
-        "🤖 ربات"
-        if game["mode"] == "bot"
-        else f"👤 {game['opponent_name']}"
     )
 
     text = (
@@ -1413,10 +1695,6 @@ async def finish_game(
         f"{opponent_total}\n\n"
     )
 
-    # =====================================================
-    # CREATOR WINS
-    # =====================================================
-
     if creator_total > opponent_total:
 
         await add_balance(
@@ -1439,10 +1717,6 @@ async def finish_game(
             f"💰 موجودی جدید:\n"
             f"{new_balance:,} {UNIT}"
         )
-
-    # =====================================================
-    # OPPONENT WINS
-    # =====================================================
 
     elif opponent_total > creator_total:
 
@@ -1475,10 +1749,6 @@ async def finish_game(
                 f"💰 موجودی جدید برنده:\n"
                 f"{new_balance:,} {UNIT}"
             )
-
-    # =====================================================
-    # TIE
-    # =====================================================
 
     else:
 
@@ -1798,6 +2068,9 @@ async def process_withdraw(
         )
 
         return True
+
+    # کم کردن موجودی
+    await remove_balance(user.id, amount)
 
     async with db_lock:
 
@@ -2382,10 +2655,6 @@ async def callback_handler(
 
     data = query.data
 
-    # =====================================================
-    # JOIN
-    # =====================================================
-
     if data == "check_join":
 
         if await require_join(
@@ -2403,10 +2672,6 @@ async def callback_handler(
             )
 
         return
-
-    # =====================================================
-    # GAMES
-    # =====================================================
 
     if data.startswith("game_"):
 
@@ -2467,10 +2732,6 @@ async def callback_handler(
             )
 
             return
-
-    # =====================================================
-    # ADMIN
-    # =====================================================
 
     if data.startswith("admin_"):
 
@@ -2551,10 +2812,6 @@ async def callback_handler(
             )
 
             return
-
-    # =====================================================
-    # NORMAL MENU
-    # =====================================================
 
     await query.answer()
 
@@ -2664,28 +2921,30 @@ async def callback_handler(
 
             "📚 راهنما:\n\n"
 
+            "🎲 1 تاس 100\n"
+            "🎲 2 تاس 100\n"
             "🎲 3 تاس 100\n"
-            "یک بازی است با ۳ پرتاب برای هر نفر.\n\n"
+            "یک بازی با ۱ تا ۳ پرتاب برای هر نفر.\n\n"
 
-            "🎲 3 تاس 400\n"
-            "یک بازی است با ۳ پرتاب برای هر نفر.\n"
-            "مبلغ بازی ۴۰۰ است.\n"
-            "برد = ۷۲۰ DOGS موج بات.\n\n"
+            "🎳 بولینگ، 🎯 دارت و 🏀 بسکتبال هم "
+            "با همین فرمت کار می‌کنند.\n\n"
 
-            "🎲 5 تاس 1000\n"
-            "یک بازی است با ۵ پرتاب برای هر نفر.\n"
-            "برد = ۱۸۰۰ DOGS موج بات.\n\n"
+            "🏀 قانون بسکتبال:\n"
+            "تاس ۳+ = گل ✅\n"
+            "تاس ۱-۲ = بیرون ❌\n"
+            "هرکی گل بیشتر = برنده\n"
+            "صفر گل = باخت\n\n"
 
             "🎮 بازی با ربات:\n"
-            "شما N بار و ربات N بار می‌اندازد.\n\n"
+            "شما N بار و ربات N بار.\n\n"
 
             "👥 بازی با دوستان:\n"
-            "سازنده N بار و حریف N بار می‌اندازد.\n\n"
+            "سازنده N بار و حریف N بار.\n\n"
 
             "🏆 فرمول برد:\n"
             "مبلغ بازی × ۱.۸\n\n"
 
-            "حداکثر بازی فعال همزمان: ۵"
+            "⚠️ حداکثر تعداد پرتاب: ۳"
         )
 
         return
@@ -2719,10 +2978,6 @@ async def text_handler(
     normalized = normalize_digits(
         text
     )
-
-    # =====================================================
-    # ADMIN INPUT
-    # =====================================================
 
     admin_action = context.user_data.get(
         "admin_action"
@@ -2843,10 +3098,6 @@ async def text_handler(
 
         return
 
-    # =====================================================
-    # WITHDRAW ONLY PRIVATE
-    # =====================================================
-
     if (
         update.effective_chat.type == ChatType.PRIVATE
         and context.user_data.get(
@@ -2861,10 +3112,6 @@ async def text_handler(
 
             return
 
-    # =====================================================
-    # BALANCE
-    # =====================================================
-
     if normalized.lower() in (
         "م",
         "موجودی",
@@ -2877,10 +3124,6 @@ async def text_handler(
         )
 
         return
-
-    # =====================================================
-    # TRANSFER
-    # =====================================================
 
     match = re.fullmatch(
         r"انتقال\s*([0-9]+)",
@@ -2900,10 +3143,6 @@ async def text_handler(
 
         return
 
-    # =====================================================
-    # GAMES ONLY GROUP
-    # =====================================================
-
     if update.effective_chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
@@ -2915,10 +3154,6 @@ async def text_handler(
         context
     ):
         return
-
-    # =====================================================
-    # EVEN / ODD
-    # =====================================================
 
     match = re.fullmatch(
         r"([0-9]+)\s*(فرد|زوج)",
@@ -2942,19 +3177,8 @@ async def text_handler(
 
         return
 
-    # =====================================================
-    # MULTI ROLL
-    #
-    # 3 تاس 100
-    # 3 تاس 400
-    # 5 تاس 1000
-    #
-    # عدد اول = تعداد پرتاب
-    # عدد آخر = مبلغ بازی
-    # =====================================================
-
     match = re.fullmatch(
-        r"([0-9]+)\s*(بولینگ|تاس|دارت)\s*([0-9]+)",
+        r"([0-9]+)\s*(بولینگ|تاس|دارت|بسکتبال)\s*([0-9]+)",
         normalized
     )
 
@@ -2969,6 +3193,14 @@ async def text_handler(
         amount = int(
             match.group(3)
         )
+
+        if count > MAX_ROLL_COUNT:
+
+            await update.message.reply_text(
+                f"❌ حداکثر تعداد پرتاب {MAX_ROLL_COUNT} است."
+            )
+
+            return
 
         if count < 1:
 
@@ -3012,16 +3244,19 @@ async def help_command(
 
         "📚 راهنمای بازی\n\n"
 
+        "🎲 1 تاس 100\n"
+        "🎲 2 تاس 100\n"
         "🎲 3 تاس 100\n"
-        "یک بازی با ۳ پرتاب برای هر نفر.\n\n"
+        "یک بازی با ۱ تا ۳ پرتاب برای هر نفر.\n\n"
 
-        "🎲 3 تاس 400\n"
-        "یک بازی با ۳ پرتاب برای هر نفر.\n"
-        "برد = ۷۲۰ DOGS موج بات.\n\n"
+        "🎳 بولینگ، 🎯 دارت و 🏀 بسکتبال هم "
+        "با همین فرمت کار می‌کنند.\n\n"
 
-        "🎲 5 تاس 1000\n"
-        "یک بازی با ۵ پرتاب برای هر نفر.\n"
-        "برد = ۱۸۰۰ DOGS موج بات.\n\n"
+        "🏀 قانون بسکتبال:\n"
+        "تاس ۳+ = گل ✅\n"
+        "تاس ۱-۲ = بیرون ❌\n"
+        "هرکی گل بیشتر = برنده\n"
+        "صفر گل = باخت\n\n"
 
         "🎮 بازی با ربات:\n"
         "شما N بار و ربات N بار.\n\n"
@@ -3032,7 +3267,7 @@ async def help_command(
         "🏆 فرمول برد:\n"
         "مبلغ بازی × ۱.۸\n\n"
 
-        "حداکثر بازی فعال: ۵"
+        "⚠️ حداکثر تعداد پرتاب: ۳"
     )
 
 
@@ -3170,7 +3405,6 @@ def main():
         )
     )
 
-    # تاس / بولینگ / دارت
     app.add_handler(
         MessageHandler(
             filters.Dice.ALL,
