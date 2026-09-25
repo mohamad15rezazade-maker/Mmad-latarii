@@ -50,7 +50,11 @@ REFERRAL_REWARD = 45
 
 MAX_ROLL_COUNT = 3
 
+# آستانه گل شدن در فوتبال
 FOOTBALL_GOAL_MIN = 3
+
+# زمان هر مرحله به ثانیه
+TURN_TIMEOUT = 60
 
 logging.basicConfig(
     level=logging.INFO,
@@ -681,6 +685,209 @@ def join_game_keyboard(game_id):
 
 
 # =========================================================
+# TIMEOUT
+# =========================================================
+
+async def timeout_task(context, game_id, stage):
+
+    await asyncio.sleep(TURN_TIMEOUT)
+
+    game = games.get(game_id)
+
+    if not game:
+        return
+
+    if stage == "choosing" and game["status"] != "choosing":
+        return
+
+    if stage == "waiting_opponent" and game["status"] != "waiting_opponent":
+        return
+
+    if stage == "creator_turn" and game["status"] != "creator_turn":
+        return
+
+    if stage == "opponent_turn" and game["status"] != "opponent_turn":
+        return
+
+    # =========================================
+    # مرحله انتخاب حالت
+    # =========================================
+
+    if stage == "choosing":
+
+        games.pop(game_id, None)
+
+        try:
+
+            await context.bot.send_message(
+
+                game["chat_id"],
+
+                f"⏰ زمان انتخاب به پایان رسید.\n\n"
+
+                f"💰 مبلغ بازی برگشت داده شد.\n"
+
+                f"💸 مبلغ: {game['amount']:,} {UNIT}"
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    # =========================================
+    # انتظار حریف
+    # =========================================
+
+    if stage == "waiting_opponent":
+
+        games.pop(game_id, None)
+
+        await add_balance(
+            game["creator_id"],
+            game["amount"]
+        )
+
+        try:
+
+            await context.bot.send_message(
+
+                game["chat_id"],
+
+                f"⏰ زمان انتظار برای حریف تمام شد.\n\n"
+
+                f"💰 مبلغ بازی برگشت داده شد.\n"
+
+                f"💸 مبلغ: {game['amount']:,} {UNIT}"
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    # =========================================
+    # بازی با ربات - کاربر پرتاب نکرده
+    # =========================================
+
+    if stage == "creator_turn" and game["mode"] == "bot":
+
+        games.pop(game_id, None)
+
+        try:
+
+            await context.bot.send_message(
+
+                game["chat_id"],
+
+                f"⏰ زمان تمام شد!\n\n"
+
+                f"❌ {game['creator_name']} در "
+                f"{TURN_TIMEOUT} ثانیه پرتاب نکرد.\n\n"
+
+                f"🤖 ربات برنده شد.\n\n"
+
+                f"💸 مبلغ بازی سوخت: "
+                f"{game['amount']:,} {UNIT}"
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    # =========================================
+    # بازی دوستان - نوبت سازنده، نریخت
+    # =========================================
+
+    if stage == "creator_turn" and game["mode"] == "friend":
+
+        reward = calculate_win_reward(
+            game["amount"]
+        )
+
+        await add_balance(
+            game["opponent_id"],
+            reward
+        )
+
+        new_balance = await get_balance(
+            game["opponent_id"]
+        )
+
+        games.pop(game_id, None)
+
+        try:
+
+            await context.bot.send_message(
+
+                game["chat_id"],
+
+                f"⏰ زمان تمام شد!\n\n"
+
+                f"❌ {game['creator_name']} در "
+                f"{TURN_TIMEOUT} ثانیه پرتاب نکرد.\n\n"
+
+                f"🏆 برنده: {game['opponent_name']}\n\n"
+
+                f"🎁 جایزه: +{reward:,} {UNIT}\n"
+
+                f"💰 موجودی جدید: "
+                f"{new_balance:,} {UNIT}"
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    # =========================================
+    # بازی دوستان - نوبت حریف، نریخت
+    # =========================================
+
+    if stage == "opponent_turn" and game["mode"] == "friend":
+
+        reward = calculate_win_reward(
+            game["amount"]
+        )
+
+        await add_balance(
+            game["creator_id"],
+            reward
+        )
+
+        new_balance = await get_balance(
+            game["creator_id"]
+        )
+
+        games.pop(game_id, None)
+
+        try:
+
+            await context.bot.send_message(
+
+                game["chat_id"],
+
+                f"⏰ زمان تمام شد!\n\n"
+
+                f"❌ {game['opponent_name']} در "
+                f"{TURN_TIMEOUT} ثانیه پرتاب نکرد.\n\n"
+
+                f"🏆 برنده: {game['creator_name']}\n\n"
+
+                f"🎁 جایزه: +{reward:,} {UNIT}\n"
+
+                f"💰 موجودی جدید: "
+                f"{new_balance:,} {UNIT}"
+            )
+
+        except Exception:
+            pass
+
+        return
+
+
+# =========================================================
 # CREATE GAME
 # =========================================================
 
@@ -804,10 +1011,20 @@ async def create_game(
 
         f"{extra}"
 
+        f"⏰ {TURN_TIMEOUT} ثانیه وقت داری انتخاب کنی.\n\n"
+
         f"یکی از گزینه‌ها را انتخاب کن:",
 
         reply_markup=choice_keyboard(
             game_id
+        )
+    )
+
+    asyncio.create_task(
+        timeout_task(
+            context,
+            game_id,
+            "choosing"
         )
     )
 
@@ -891,8 +1108,18 @@ async def start_bot_game(
         f"{game['roll_count']} بار "
         f"{game['emoji']} بیندازید.\n\n"
 
+        f"⏰ {TURN_TIMEOUT} ثانیه وقت داری.\n\n"
+
         f"پرتاب ۱ از "
         f"{game['roll_count']}"
+    )
+
+    asyncio.create_task(
+        timeout_task(
+            context,
+            game["id"],
+            "creator_turn"
+        )
     )
 
 
@@ -994,10 +1221,20 @@ async def start_friend_game(
         f"👤 سازنده: "
         f"{game['creator_name']}\n\n"
 
+        f"⏰ {TURN_TIMEOUT} ثانیه وقت داری.\n\n"
+
         f"برای ورود روی دکمه زیر بزن:",
 
         reply_markup=join_game_keyboard(
             game["id"]
+        )
+    )
+
+    asyncio.create_task(
+        timeout_task(
+            context,
+            game["id"],
+            "waiting_opponent"
         )
     )
 
@@ -1094,11 +1331,21 @@ async def join_friend_game(
         f"💠 مبلغ: "
         f"{game['amount']:,} {UNIT}\n\n"
 
+        f"⏰ {TURN_TIMEOUT} ثانیه وقت داری.\n\n"
+
         f"🎲 اول نوبت "
         f"{game['creator_name']} است.\n\n"
 
         f"پرتاب ۱ از "
         f"{game['roll_count']}"
+    )
+
+    asyncio.create_task(
+        timeout_task(
+            context,
+            game["id"],
+            "creator_turn"
+        )
     )
 
 
@@ -1179,7 +1426,7 @@ async def cancel_game(
 
 
 # =========================================================
-# RESET GAMES (OWNER ONLY)
+# RESET (OWNER)
 # =========================================================
 
 async def reset_games(update, context):
@@ -1409,10 +1656,16 @@ async def process_roll(update, context):
 
                 progress_text +
 
-                f"🎯 پرتاب بعدی را انجام بده."
+                f"🎯 پرتاب بعدی را انجام بده.\n\n"
+
+                f"⏰ {TURN_TIMEOUT} ثانیه وقت داری."
             )
 
             return
+
+        # =========================================
+        # BOT MODE
+        # =========================================
 
         if game["mode"] == "bot":
 
@@ -1448,6 +1701,10 @@ async def process_roll(update, context):
 
             return
 
+        # =========================================
+        # FRIEND MODE
+        # =========================================
+
         game["status"] = "opponent_turn"
 
         await context.bot.send_message(
@@ -1459,13 +1716,23 @@ async def process_roll(update, context):
             f"🎯 حالا نوبت "
             f"{game['opponent_name']} است.\n\n"
 
+            f"⏰ {TURN_TIMEOUT} ثانیه وقت داری.\n\n"
+
             f"پرتاب ۱ از {max_rolls}"
+        )
+
+        asyncio.create_task(
+            timeout_task(
+                context,
+                game["id"],
+                "opponent_turn"
+            )
         )
 
         return
 
     # =====================================================
-    # OPPONENT TURN (friend)
+    # OPPONENT TURN
     # =====================================================
 
     if (
@@ -1528,7 +1795,9 @@ async def process_roll(update, context):
 
                 progress_text +
 
-                f"🎯 پرتاب بعدی را انجام بده."
+                f"🎯 پرتاب بعدی را انجام بده.\n\n"
+
+                f"⏰ {TURN_TIMEOUT} ثانیه وقت داری."
             )
 
             return
@@ -1923,9 +2192,7 @@ async def even_odd_game(
         )
 
         result_text = (
-
             f"🏆 برنده شدی!\n"
-
             f"🎁 +{reward:,} {UNIT}"
         )
 
@@ -2133,6 +2400,7 @@ async def process_withdraw(
 
         return True
 
+    # ✅ کسر فوری
     await remove_balance(user.id, amount)
 
     async with db_lock:
@@ -2159,6 +2427,7 @@ async def process_withdraw(
 
             db.commit()
 
+    # ✅ ارسال به کانال
     try:
 
         await context.bot.send_message(
@@ -2196,13 +2465,16 @@ async def process_withdraw(
 
     await update.message.reply_text(
 
-        f"✅ برداشت شما در کانال ثبت شد.\n\n"
+        f"✅ برداشت شما ثبت شد و مبلغ کسر شد.\n\n"
 
         f"💰 مقدار: "
         f"{amount:,} {UNIT}\n"
 
         f"🆔 درخواست: "
-        f"{request_id}"
+        f"{request_id}\n\n"
+
+        f"💳 موجودی جدید: "
+        f"{await get_balance(user.id):,} {UNIT}"
     )
 
     return True
@@ -2998,11 +3270,8 @@ async def callback_handler(
             "هرکی گل بیشتر = برنده\n"
             "مساوی = پول برگشت\n\n"
 
-            "🎮 بازی با ربات:\n"
-            "شما N بار و ربات N بار.\n\n"
-
-            "👥 بازی با دوستان:\n"
-            "سازنده N بار و حریف N بار.\n\n"
+            "⏰ زمان هر نوبت: "
+            f"{TURN_TIMEOUT} ثانیه\n\n"
 
             "🏆 فرمول برد:\n"
             "مبلغ بازی × ۱.۸\n\n"
@@ -3337,11 +3606,8 @@ async def help_command(
         "هرکی گل بیشتر = برنده\n"
         "مساوی = پول برگشت\n\n"
 
-        "🎮 بازی با ربات:\n"
-        "شما N بار و ربات N بار.\n\n"
-
-        "👥 بازی با دوستان:\n"
-        "هر دو بازیکن N بار.\n\n"
+        "⏰ زمان هر نوبت: "
+        f"{TURN_TIMEOUT} ثانیه\n\n"
 
         "🏆 فرمول برد:\n"
         "مبلغ بازی × ۱.۸\n\n"
