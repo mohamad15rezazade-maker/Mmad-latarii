@@ -51,10 +51,10 @@ REFERRAL_REWARD = 45
 MAX_ROLL_COUNT = 3
 
 FOOTBALL_GOAL_MIN = 3
+BASKETBALL_SCORE_MIN = 4
 
 TURN_TIMEOUT = 60
 
-# گپ مجاز برای بازی
 ALLOWED_GAME_CHAT = "BET_TAKbotcv"
 
 logging.basicConfig(
@@ -77,6 +77,7 @@ GAME_EMOJI = {
     "بولینگ": "🎳",
     "دارت": "🎯",
     "فوتبال": "⚽",
+    "بسکتبال": "🏀",
 }
 
 # =========================================================
@@ -397,7 +398,7 @@ def calculate_win_reward(amount):
 
 
 # =========================================================
-# FOOTBALL HELPERS
+# GOAL HELPERS
 # =========================================================
 
 def is_football_goal(value):
@@ -412,6 +413,41 @@ def count_football_goals(rolls):
         for value in rolls
         if is_football_goal(value)
     )
+
+
+def is_basketball_score(value):
+
+    return value >= BASKETBALL_SCORE_MIN
+
+
+def count_basketball_goals(rolls):
+
+    return sum(
+        1
+        for value in rolls
+        if is_basketball_score(value)
+    )
+
+
+def is_goal_game(game_type):
+
+    return game_type in ("فوتبال", "بسکتبال")
+
+
+def count_goals(game_type, rolls):
+
+    if game_type == "فوتبال":
+        return count_football_goals(rolls)
+
+    return count_basketball_goals(rolls)
+
+
+def is_goal_value(game_type, value):
+
+    if game_type == "فوتبال":
+        return is_football_goal(value)
+
+    return is_basketball_score(value)
 
 
 # =========================================================
@@ -731,10 +767,6 @@ async def timeout_task(context, game_id, stage):
     if stage == "opponent_turn" and game["status"] != "opponent_turn":
         return
 
-    # =========================================
-    # انتخاب حالت
-    # =========================================
-
     if stage == "choosing":
 
         games.pop(game_id, None)
@@ -756,10 +788,6 @@ async def timeout_task(context, game_id, stage):
             pass
 
         return
-
-    # =========================================
-    # انتظار حریف
-    # =========================================
 
     if stage == "waiting_opponent":
 
@@ -788,10 +816,6 @@ async def timeout_task(context, game_id, stage):
 
         return
 
-    # =========================================
-    # بازی با ربات - کاربر پرتاب نکرده
-    # =========================================
-
     if stage == "creator_turn" and game["mode"] == "bot":
 
         games.pop(game_id, None)
@@ -817,10 +841,6 @@ async def timeout_task(context, game_id, stage):
             pass
 
         return
-
-    # =========================================
-    # دوستان - نوبت سازنده، نریخت
-    # =========================================
 
     if stage == "creator_turn" and game["mode"] == "friend":
 
@@ -862,10 +882,6 @@ async def timeout_task(context, game_id, stage):
             pass
 
         return
-
-    # =========================================
-    # دوستان - نوبت حریف، نریخت
-    # =========================================
 
     if stage == "opponent_turn" and game["mode"] == "friend":
 
@@ -1020,6 +1036,16 @@ async def create_game(
             f"⚽ قانون فوتبال:\n"
             f"⚽ ۳، ۴، ۵ = گل ✅\n"
             f"⚽ ۱، ۲ = گل نشد ❌\n"
+            f"هرکی گل بیشتر = برنده\n"
+            f"مساوی = پول برگشت\n\n"
+        )
+
+    elif game_type == "بسکتبال":
+
+        extra = (
+            f"🏀 قانون بسکتبال:\n"
+            f"🏀 ۴، ۵ = تور شد ✅\n"
+            f"🏀 ۱، ۲، ۳ = بیرون / اوت ❌\n"
             f"هرکی گل بیشتر = برنده\n"
             f"مساوی = پول برگشت\n\n"
         )
@@ -1589,7 +1615,7 @@ async def process_roll(update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    if emoji not in ("🎲", "🎳", "🎯", "⚽"):
+    if emoji not in ("🎲", "🎳", "🎯", "⚽", "🏀"):
         return
 
     selected = None
@@ -1642,23 +1668,32 @@ async def process_roll(update, context):
 
         max_rolls = game["roll_count"]
 
-        if game["type"] == "فوتبال":
+        if is_goal_game(game["type"]):
 
-            goal = is_football_goal(value)
+            is_goal = is_goal_value(game["type"], value)
 
-            goal_icon = "✅ گل" if goal else "❌ گل نشد"
+            if game["type"] == "فوتبال":
+                icon = "⚽"
+                goal_icon = "✅ گل" if is_goal else "❌ گل نشد"
+                goal_word = "گل‌های فعلی"
 
-            goals_total = count_football_goals(
+            else:
+                icon = "🏀"
+                goal_icon = "✅ تور" if is_goal else "❌ بیرون/اوت"
+                goal_word = "گل‌های فعلی"
+
+            goals_total = count_goals(
+                game["type"],
                 game["creator_rolls"]
             )
 
             progress_text = (
-                f"⚽ پرتاب {current} از {max_rolls}\n\n"
+                f"{icon} پرتاب {current} از {max_rolls}\n\n"
 
                 f"👤 {game['creator_name']}: "
                 f"{value} → {goal_icon}\n"
 
-                f"🥅 گل‌های فعلی: "
+                f"🥅 {goal_word}: "
                 f"{goals_total}\n\n"
             )
 
@@ -1762,23 +1797,32 @@ async def process_roll(update, context):
 
         max_rolls = game["roll_count"]
 
-        if game["type"] == "فوتبال":
+        if is_goal_game(game["type"]):
 
-            goal = is_football_goal(value)
+            is_goal = is_goal_value(game["type"], value)
 
-            goal_icon = "✅ گل" if goal else "❌ گل نشد"
+            if game["type"] == "فوتبال":
+                icon = "⚽"
+                goal_icon = "✅ گل" if is_goal else "❌ گل نشد"
+                goal_word = "گل‌های فعلی"
 
-            goals_total = count_football_goals(
+            else:
+                icon = "🏀"
+                goal_icon = "✅ تور" if is_goal else "❌ بیرون/اوت"
+                goal_word = "گل‌های فعلی"
+
+            goals_total = count_goals(
+                game["type"],
                 game["opponent_rolls"]
             )
 
             progress_text = (
-                f"⚽ پرتاب {current} از {max_rolls}\n\n"
+                f"{icon} پرتاب {current} از {max_rolls}\n\n"
 
                 f"👤 {game['opponent_name']}: "
                 f"{value} → {goal_icon}\n"
 
-                f"🥅 گل‌های فعلی: "
+                f"🥅 {goal_word}: "
                 f"{goals_total}\n\n"
             )
 
@@ -1829,16 +1873,18 @@ async def finish_game(context, game):
     )
 
     # =====================================================
-    # فوتبال
+    # فوتبال / بسکتبال
     # =====================================================
 
-    if game["type"] == "فوتبال":
+    if is_goal_game(game["type"]):
 
-        creator_goals = count_football_goals(
+        creator_goals = count_goals(
+            game["type"],
             game["creator_rolls"]
         )
 
-        opponent_goals = count_football_goals(
+        opponent_goals = count_goals(
+            game["type"],
             game["opponent_rolls"]
         )
 
@@ -1850,11 +1896,18 @@ async def finish_game(context, game):
             map(str, game["opponent_rolls"])
         )
 
+        if game["type"] == "فوتبال":
+            title = "🏁 نتیجه بازی فوتبال"
+            icon = "⚽"
+        else:
+            title = "🏁 نتیجه بازی بسکتبال"
+            icon = "🏀"
+
         text = (
 
-            f"🏁 نتیجه بازی فوتبال\n\n"
+            f"{title}\n\n"
 
-            f"⚽ {game['type']}\n"
+            f"{icon} {game['type']}\n"
 
             f"🔢 {game['roll_count']} پرتاب\n"
 
@@ -1866,13 +1919,13 @@ async def finish_game(context, game):
 
             f"👤 {game['creator_name']}:\n"
 
-            f"⚽ {creator_rolls}\n"
+            f"{icon} {creator_rolls}\n"
 
             f"🥅 گل‌ها: {creator_goals}\n\n"
 
             f"{opponent_title}:\n"
 
-            f"⚽ {opponent_rolls}\n"
+            f"{icon} {opponent_rolls}\n"
 
             f"🥅 گل‌ها: {opponent_goals}\n\n"
         )
@@ -2161,13 +2214,11 @@ async def high_low_game(update, context, amount, choice):
     if choice == "بالا":
 
         won = value >= 4
-
         choice_display = "بالا"
 
     else:
 
         won = value <= 3
-
         choice_display = "پایین"
 
     if won:
@@ -2939,12 +2990,18 @@ async def callback_handler(update, context):
             "🎲 3 تاس 100\n"
             "۱ تا ۳ پرتاب برای هر نفر.\n\n"
 
-            "🎳 بولینگ، 🎯 دارت و ⚽ فوتبال هم "
+            "🎳 بولینگ، 🎯 دارت، ⚽ فوتبال و 🏀 بسکتبال هم "
             "با همین فرمت کار می‌کنند.\n\n"
 
             "⚽ قانون فوتبال:\n"
             "⚽ ۳، ۴، ۵ = گل ✅\n"
             "⚽ ۱، ۲ = گل نشد ❌\n"
+            "هرکی گل بیشتر = برنده\n"
+            "مساوی = پول برگشت\n\n"
+
+            "🏀 قانون بسکتبال:\n"
+            "🏀 ۴، ۵ = تور شد ✅\n"
+            "🏀 ۱، ۲، ۳ = بیرون / اوت ❌\n"
             "هرکی گل بیشتر = برنده\n"
             "مساوی = پول برگشت\n\n"
 
@@ -2984,10 +3041,6 @@ async def text_handler(update, context):
     text = clean_text(update.message.text)
 
     normalized = normalize_digits(text)
-
-    # =========================================
-    # ADMIN INPUT
-    # =========================================
 
     admin_action = context.user_data.get("admin_action")
 
@@ -3068,10 +3121,6 @@ async def text_handler(update, context):
         )
         return
 
-    # =========================================
-    # WITHDRAW
-    # =========================================
-
     if (
         update.effective_chat.type == ChatType.PRIVATE
         and context.user_data.get("waiting_withdraw")
@@ -3080,27 +3129,15 @@ async def text_handler(update, context):
         if await process_withdraw(update, context):
             return
 
-    # =========================================
-    # ریست
-    # =========================================
-
     if normalized.lower() in ("ریست", "reset"):
 
         await reset_games(update, context)
         return
 
-    # =========================================
-    # موجودی
-    # =========================================
-
     if normalized.lower() in ("م", "موجودی", "balance"):
 
         await show_balance(update, context)
         return
-
-    # =========================================
-    # انتقال
-    # =========================================
 
     match = re.fullmatch(r"انتقال\s*([0-9]+)", normalized)
 
@@ -3111,10 +3148,6 @@ async def text_handler(update, context):
         await do_transfer(update, amount)
         return
 
-    # =========================================
-    # بازی فقط در گپ مجاز
-    # =========================================
-
     if update.effective_chat.type not in (
         ChatType.GROUP,
         ChatType.SUPERGROUP
@@ -3123,12 +3156,9 @@ async def text_handler(update, context):
 
     if update.effective_chat.username != ALLOWED_GAME_CHAT:
 
-        # فقط اگه پیام شبیه دستور بازی بود، پیام خطا بده
-        # وگرنه ساکت بمون
-
         looks_like_game = (
             re.fullmatch(
-                r"[0-9]+\s*(بولینگ|تاس|دارت|فوتبال)\s*[0-9]+",
+                r"[0-9]+\s*(بولینگ|تاس|دارت|فوتبال|بسکتبال)\s*[0-9]+",
                 normalized
             )
             or re.fullmatch(
@@ -3155,10 +3185,6 @@ async def text_handler(update, context):
     if not await require_join(update, context):
         return
 
-    # =========================================
-    # فرد / زوج
-    # =========================================
-
     match = re.fullmatch(
         r"([0-9]+)\s*(فرد|زوج)",
         normalized
@@ -3171,10 +3197,6 @@ async def text_handler(update, context):
 
         await even_odd_game(update, context, amount, choice)
         return
-
-    # =========================================
-    # بالا / پایین
-    # =========================================
 
     match = re.fullmatch(
         r"([0-9]+)\s*(بالا|پایین|ب|پ)",
@@ -3194,12 +3216,8 @@ async def text_handler(update, context):
         await high_low_game(update, context, amount, choice)
         return
 
-    # =========================================
-    # بازی‌های تاس / بولینگ / دارت / فوتبال
-    # =========================================
-
     match = re.fullmatch(
-        r"([0-9]+)\s*(بولینگ|تاس|دارت|فوتبال)\s*([0-9]+)",
+        r"([0-9]+)\s*(بولینگ|تاس|دارت|فوتبال|بسکتبال)\s*([0-9]+)",
         normalized
     )
 
@@ -3252,12 +3270,18 @@ async def help_command(update, context):
         "🎲 3 تاس 100\n"
         "۱ تا ۳ پرتاب برای هر نفر.\n\n"
 
-        "🎳 بولینگ، 🎯 دارت و ⚽ فوتبال هم "
+        "🎳 بولینگ، 🎯 دارت، ⚽ فوتبال و 🏀 بسکتبال هم "
         "با همین فرمت کار می‌کنند.\n\n"
 
         "⚽ قانون فوتبال:\n"
         "⚽ ۳، ۴، ۵ = گل ✅\n"
         "⚽ ۱، ۲ = گل نشد ❌\n"
+        "هرکی گل بیشتر = برنده\n"
+        "مساوی = پول برگشت\n\n"
+
+        "🏀 قانون بسکتبال:\n"
+        "🏀 ۴، ۵ = تور شد ✅\n"
+        "🏀 ۱، ۲، ۳ = بیرون / اوت ❌\n"
         "هرکی گل بیشتر = برنده\n"
         "مساوی = پول برگشت\n\n"
 
