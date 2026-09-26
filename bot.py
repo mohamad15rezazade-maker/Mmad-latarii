@@ -1675,12 +1675,9 @@ async def process_roll(update, context):
             if game["type"] == "فوتبال":
                 icon = "⚽"
                 goal_icon = "✅ گل" if is_goal else "❌ گل نشد"
-                goal_word = "گل‌های فعلی"
-
             else:
                 icon = "🏀"
                 goal_icon = "✅ تور" if is_goal else "❌ بیرون/اوت"
-                goal_word = "گل‌های فعلی"
 
             goals_total = count_goals(
                 game["type"],
@@ -1693,7 +1690,7 @@ async def process_roll(update, context):
                 f"👤 {game['creator_name']}: "
                 f"{value} → {goal_icon}\n"
 
-                f"🥅 {goal_word}: "
+                f"🥅 گل‌های فعلی: "
                 f"{goals_total}\n\n"
             )
 
@@ -1804,12 +1801,9 @@ async def process_roll(update, context):
             if game["type"] == "فوتبال":
                 icon = "⚽"
                 goal_icon = "✅ گل" if is_goal else "❌ گل نشد"
-                goal_word = "گل‌های فعلی"
-
             else:
                 icon = "🏀"
                 goal_icon = "✅ تور" if is_goal else "❌ بیرون/اوت"
-                goal_word = "گل‌های فعلی"
 
             goals_total = count_goals(
                 game["type"],
@@ -1822,7 +1816,7 @@ async def process_roll(update, context):
                 f"👤 {game['opponent_name']}: "
                 f"{value} → {goal_icon}\n"
 
-                f"🥅 {goal_word}: "
+                f"🥅 گل‌های فعلی: "
                 f"{goals_total}\n\n"
             )
 
@@ -1871,10 +1865,6 @@ async def finish_game(context, game):
         if game["mode"] == "bot"
         else f"👤 {game['opponent_name']}"
     )
-
-    # =====================================================
-    # فوتبال / بسکتبال
-    # =====================================================
 
     if is_goal_game(game["type"]):
 
@@ -1981,10 +1971,6 @@ async def finish_game(context, game):
         await context.bot.send_message(game["chat_id"], text)
 
         return
-
-    # =====================================================
-    # تاس / بولینگ / دارت
-    # =====================================================
 
     creator_total = sum(game["creator_rolls"])
     opponent_total = sum(game["opponent_rolls"])
@@ -2260,7 +2246,7 @@ async def high_low_game(update, context, amount, choice):
 # TRANSFER
 # =========================================================
 
-async def do_transfer(update, amount):
+async def do_transfer(update, context, amount, target_username=None):
 
     sender = update.effective_user
 
@@ -2275,45 +2261,127 @@ async def do_transfer(update, amount):
 
         return
 
-    reply = update.message.reply_to_message
+    receiver_id = None
+    receiver_name = None
 
-    if not reply:
+    # =========================================
+    # حالت ۱: با یوزرنیم
+    # =========================================
+
+    if target_username:
+
+        target_username = target_username.lstrip("@").strip()
+
+        async with db_lock:
+
+            with closing(get_db()) as db:
+
+                row = db.execute(
+                    """
+                    SELECT user_id, first_name, username
+                    FROM users
+                    WHERE LOWER(username) = LOWER(?)
+                    """,
+                    (target_username,)
+                ).fetchone()
+
+        if not row:
+
+            await update.message.reply_text(
+
+                f"❌ کاربری با یوزرنیم "
+                f"@{target_username} پیدا نشد.\n\n"
+
+                f"⚠️ کاربر باید حداقل یکبار "
+                f"ربات را استارت کرده باشد."
+            )
+
+            return
+
+        receiver_id = row["user_id"]
+        receiver_name = row["first_name"]
+
+        if receiver_id == sender.id:
+
+            await update.message.reply_text(
+                "❌ نمی‌توانی به خودت انتقال بدهی."
+            )
+
+            return
+
+    # =========================================
+    # حالت ۲: با ریپلای
+    # =========================================
+
+    else:
+
+        reply = update.message.reply_to_message
+
+        if not reply:
+
+            await update.message.reply_text(
+
+                "❌ دو راه داری:\n\n"
+
+                "۱) روی پیام کاربر ریپلای کن و بنویس:\n"
+                "انتقال 500\n\n"
+
+                "۲) با یوزرنیم بفرست:\n"
+                "انتقال 500 @username"
+            )
+
+            return
+
+        receiver_user = reply.from_user
+
+        if receiver_user.is_bot:
+
+            await update.message.reply_text(
+                "❌ نمی‌توانی به ربات انتقال بدهی."
+            )
+
+            return
+
+        if receiver_user.id == sender.id:
+
+            await update.message.reply_text(
+                "❌ نمی‌توانی به خودت انتقال بدهی."
+            )
+
+            return
+
+        await ensure_user(receiver_user)
+
+        receiver_id = receiver_user.id
+        receiver_name = receiver_user.first_name
+
+    # =========================================
+    # بررسی مبلغ
+    # =========================================
+
+    if amount <= 0:
 
         await update.message.reply_text(
-            "❌ روی پیام کاربر ریپلای کن."
+            "❌ مبلغ باید بیشتر از صفر باشد."
         )
 
         return
 
-    receiver = reply.from_user
-
-    if receiver.is_bot:
-
-        await update.message.reply_text(
-            "❌ نمی‌توانی به ربات انتقال بدهی."
-        )
-
-        return
-
-    if receiver.id == sender.id:
-
-        await update.message.reply_text(
-            "❌ نمی‌توانی به خودت انتقال بدهی."
-        )
-
-        return
-
-    await ensure_user(receiver)
+    # =========================================
+    # کسر و واریز
+    # =========================================
 
     success = await remove_balance(sender.id, amount)
 
     if not success:
 
-        await update.message.reply_text("❌ موجودی کافی نیست.")
+        await update.message.reply_text(
+            "❌ موجودی کافی نیست."
+        )
 
         return
 
-    await add_balance(receiver.id, amount)
+    await add_balance(receiver_id, amount)
 
     async with db_lock:
 
@@ -2325,7 +2393,7 @@ async def do_transfer(update, amount):
                 (sender_id, receiver_id, amount)
                 VALUES (?, ?, ?)
                 """,
-                (sender.id, receiver.id, amount)
+                (sender.id, receiver_id, amount)
             )
 
             db.commit()
@@ -2334,7 +2402,7 @@ async def do_transfer(update, amount):
 
         f"✅ انتقال انجام شد.\n\n"
 
-        f"👤 گیرنده: {receiver.first_name}\n"
+        f"👤 گیرنده: {receiver_name}\n"
 
         f"💰 مقدار: {amount:,} {UNIT}\n\n"
 
@@ -2956,8 +3024,14 @@ async def callback_handler(update, context):
     if data == "transfer_help":
 
         await query.message.reply_text(
-            "🔁 روی پیام کاربر ریپلای کن و بنویس:\n\n"
-            "انتقال 500"
+
+            "🔁 انتقال دو روش:\n\n"
+
+            "۱) ریپلای روی پیام کاربر:\n"
+            "انتقال 500\n\n"
+
+            "۲) با یوزرنیم:\n"
+            "انتقال 500 @username"
         )
         return
 
@@ -3012,6 +3086,12 @@ async def callback_handler(update, context):
             "🎲 500 پایین یا 500 پ\n"
             "اگر 1,2,3 بیاد = برد\n"
             "اگر 4,5,6 بیاد = باخت\n\n"
+
+            "🔁 انتقال دو روش:\n"
+            "۱) ریپلای روی پیام کاربر:\n"
+            "انتقال 500\n\n"
+            "۲) با یوزرنیم:\n"
+            "انتقال 500 @username\n\n"
 
             "⏰ زمان هر نوبت: 60 ثانیه\n\n"
 
@@ -3139,13 +3219,51 @@ async def text_handler(update, context):
         await show_balance(update, context)
         return
 
-    match = re.fullmatch(r"انتقال\s*([0-9]+)", normalized)
+    # =====================================================
+    # انتقال با یوزرنیم
+    # =====================================================
+
+    match = re.fullmatch(
+        r"انتقال\s*([0-9]+)\s*@([A-Za-z0-9_]+)",
+        text
+    )
+
+    if match:
+
+        amount = int(
+            normalize_digits(match.group(1))
+        )
+
+        target_username = match.group(2)
+
+        await do_transfer(
+            update,
+            context,
+            amount,
+            target_username
+        )
+
+        return
+
+    # =====================================================
+    # انتقال با ریپلای
+    # =====================================================
+
+    match = re.fullmatch(
+        r"انتقال\s*([0-9]+)",
+        normalized
+    )
 
     if match:
 
         amount = int(match.group(1))
 
-        await do_transfer(update, amount)
+        await do_transfer(
+            update,
+            context,
+            amount
+        )
+
         return
 
     if update.effective_chat.type not in (
@@ -3292,6 +3410,12 @@ async def help_command(update, context):
         "🎲 500 پایین یا 500 پ\n"
         "اگر 1,2,3 بیاد = برد\n"
         "اگر 4,5,6 بیاد = باخت\n\n"
+
+        "🔁 انتقال دو روش:\n"
+        "۱) ریپلای روی پیام کاربر:\n"
+        "انتقال 500\n\n"
+        "۲) با یوزرنیم:\n"
+        "انتقال 500 @username\n\n"
 
         "⏰ زمان هر نوبت: 60 ثانیه\n\n"
 
