@@ -1,4 +1,10 @@
 __pycache__/
 *.pyc
+*.pyo
 *.db
+*.sqlite
 .env
+venv/
+env/
+.venv/
+*.log
